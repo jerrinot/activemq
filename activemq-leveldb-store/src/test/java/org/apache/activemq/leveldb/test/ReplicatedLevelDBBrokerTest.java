@@ -20,6 +20,7 @@ import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.TransportConnector;
 import org.apache.activemq.leveldb.replicated.ElectingLevelDBStore;
+import org.apache.activemq.leveldb.replicated.hazelcast.HazelcastElectingLevelDBStore;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -50,6 +51,7 @@ import static org.junit.Assert.*;
  * Holds broker unit tests of the replicated leveldb store.
  */
 public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
+    private enum ElectionType { ZOOKEEPER, HAZELCAST }
 
     final SynchronousQueue<BrokerService> masterQueue = new SynchronousQueue<BrokerService>();
     ArrayList<BrokerService> brokers = new ArrayList<BrokerService>();
@@ -59,8 +61,13 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
      * https://issues.apache.org/jira/browse/AMQ-4837
      */
     @Test(timeout = 1000*60*10)
-    public void testAMQ4837viaJMS() throws Throwable {
-        testAMQ4837(false);
+    public void testAMQ4837viaJMS_zookeeper() throws Throwable {
+        testAMQ4837(false, ElectionType.ZOOKEEPER);
+    }
+
+    @Test(timeout = 1000*60*10)
+    public void testAMQ4837viaJMS_hazelcast() throws Throwable {
+        testAMQ4837(false, ElectionType.HAZELCAST);
     }
 
   /**
@@ -68,10 +75,19 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
      * https://issues.apache.org/jira/browse/AMQ-4837
      */
     @Test(timeout = 1000*60*10)
-    public void testAMQ4837viaJMX() throws Throwable {
+    public void testAMQ4837viaJMX_zookeeper() throws Throwable {
         for (int i = 0; i < 2; i++) {
             resetDataDirs();
-            testAMQ4837(true);
+            testAMQ4837(true, ElectionType.ZOOKEEPER);
+            stopBrokers();
+        }
+    }
+
+    @Test(timeout = 1000*60*10)
+    public void testAMQ4837viaJMX_hazelcast() throws Throwable {
+        for (int i = 0; i < 2; i++) {
+            resetDataDirs();
+            testAMQ4837(true, ElectionType.HAZELCAST);
             stopBrokers();
         }
     }
@@ -125,8 +141,8 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
         System.out.println("======================================");
         System.out.println(" Start 2 ActiveMQ nodes.");
         System.out.println("======================================");
-        startBrokerAsync(createBrokerNode("node-1", port));
-        startBrokerAsync(createBrokerNode("node-2", port));
+        startBrokerAsync(createBrokerNode("node-1", port, ElectionType.ZOOKEEPER));
+        startBrokerAsync(createBrokerNode("node-2", port, ElectionType.ZOOKEEPER));
         BrokerService master = waitForNextMaster();
         System.out.println("======================================");
         System.out.println(" Start the producer and consumer");
@@ -189,7 +205,7 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
             System.out.println("======================================");
             System.out.println(" Restart the slave. Clients should make progress again..");
             System.out.println("======================================");
-            startBrokersAsync(createBrokerNodes(stopped));
+            startBrokersAsync(createBrokerNodes(stopped, ElectionType.ZOOKEEPER));
             assertCounterMakesProgress(sentCounter, 10, TimeUnit.SECONDS);
             assertCounterMakesProgress(receivedCounter, 5, TimeUnit.SECONDS);
             assertNull(errors.poll());
@@ -210,10 +226,10 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
         }
     }
 
-    protected ArrayList<BrokerService> createBrokerNodes(ArrayList<BrokerService> brokers) throws Exception {
+    protected ArrayList<BrokerService> createBrokerNodes(ArrayList<BrokerService> brokers, ElectionType electionType) throws Exception {
         ArrayList<BrokerService> rc = new ArrayList<BrokerService>();
         for (BrokerService b : brokers) {
-            rc.add(createBrokerNode(b.getBrokerName(), connectPort(b)));
+            rc.add(createBrokerNode(b.getBrokerName(), connectPort(b), electionType));
         }
         return rc;
     }
@@ -250,15 +266,15 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
         });
     }
 
-    public void testAMQ4837(boolean jmx) throws Throwable {
+    public void testAMQ4837(boolean jmx, ElectionType electionType) throws Throwable {
 
         try {
             System.out.println("======================================");
             System.out.println("1.	Start 3 activemq nodes.");
             System.out.println("======================================");
-            startBrokerAsync(createBrokerNode("node-1"));
-            startBrokerAsync(createBrokerNode("node-2"));
-            startBrokerAsync(createBrokerNode("node-3"));
+            startBrokerAsync(createBrokerNode("node-1", port, electionType));
+            startBrokerAsync(createBrokerNode("node-2", port, electionType));
+            startBrokerAsync(createBrokerNode("node-3", port, electionType));
 
             BrokerService master = waitForNextMaster();
             System.out.println("======================================");
@@ -284,7 +300,7 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
             System.out.println("======================================");
             System.out.println("5.	Restart the stopped node & 6. stop current master");
             System.out.println("======================================");
-            prevMaster = createBrokerNode(prevMaster.getBrokerName());
+            prevMaster = createBrokerNode(prevMaster.getBrokerName(), port, electionType);
             startBrokerAsync(prevMaster);
             stop(master);
 
@@ -413,16 +429,12 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
         brokers.clear();
     }
 
-    private BrokerService createBrokerNode(String id) throws Exception {
-        return createBrokerNode(id, 0);
-    }
-
-    private BrokerService createBrokerNode(String id, int port) throws Exception {
+    private BrokerService createBrokerNode(String id, int port, ElectionType electionType) throws Exception {
         BrokerService bs = new BrokerService();
         bs.getManagementContext().setCreateConnector(false);
         brokers.add(bs);
         bs.setBrokerName(id);
-        bs.setPersistenceAdapter(createStoreNode(id));
+        bs.setPersistenceAdapter(createStoreNode(id, electionType));
         TransportConnector connector = new TransportConnector();
         connector.setUri(new URI("tcp://0.0.0.0:" + port));
         bs.addConnector(connector);
@@ -430,25 +442,42 @@ public class ReplicatedLevelDBBrokerTest extends ZooKeeperTestSupport {
     }
 
 
-    private ElectingLevelDBStore createStoreNode(String id) {
-
-        // This little hack is in here because we give each of the 3 brokers
-        // different broker names so they can show up in JMX correctly,
-        // but the store needs to be configured with the same broker name
-        // so that they can find each other in ZK properly.
-        ElectingLevelDBStore store = new ElectingLevelDBStore() {
-            @Override
-            public void start() throws Exception {
-                this.setBrokerName("localhost");
-                super.start();
-            }
-        };
+    private ElectingLevelDBStore createStoreNode(String id, ElectionType electionType) {
+        ElectingLevelDBStore store = createElectingLevelDBStoreInstance(electionType);
         store.setDirectory(new File(data_dir(), id));
         store.setContainer(id);
         store.setReplicas(3);
         store.setZkAddress("localhost:" + connector.getLocalPort());
         store.setHostname("localhost");
         store.setBind("tcp://0.0.0.0:0");
+        return store;
+    }
+
+    private ElectingLevelDBStore createElectingLevelDBStoreInstance(ElectionType electionType) {
+        ElectingLevelDBStore store;
+        switch (electionType) {
+            case HAZELCAST: store = new HazelcastElectingLevelDBStore() {
+                @Override
+                // This little hack is in here because we give each of the 3 brokers
+                // different broker names so they can show up in JMX correctly,
+                // but the store needs to be configured with the same broker name
+                // so that they can find each other in ZK properly.
+                public void start() throws Exception {
+                    this.setBrokerName("localhost");
+                    super.start();
+                }
+            };
+                break;
+            case ZOOKEEPER: store = new ElectingLevelDBStore() {
+                @Override
+                public void start() throws Exception {
+                    this.setBrokerName("localhost");
+                    super.start();
+                }
+            };
+                break;
+            default: throw new IllegalArgumentException("Unknown election type '"+electionType+"'.");
+        }
         return store;
     }
 }

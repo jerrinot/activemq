@@ -21,6 +21,7 @@ import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.leveldb.CountDownFuture;
 import org.apache.activemq.leveldb.LevelDBStore;
 import org.apache.activemq.leveldb.replicated.ElectingLevelDBStore;
+import org.apache.activemq.leveldb.replicated.hazelcast.HazelcastElectingLevelDBStore;
 import org.apache.activemq.store.MessageStore;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -35,18 +36,30 @@ import static org.junit.Assert.*;
 
 /**
  */
+
 public class ElectingLevelDBStoreTest extends ZooKeeperTestSupport {
 
     protected static final Logger LOG = LoggerFactory.getLogger(ElectingLevelDBStoreTest.class);
 
+    private enum ELECTION_TYPE { ZOOKEEPER, HAZELCAST }
+
     @Test(timeout = 1000*60*60)
-    public void testElection() throws Exception {
+    public void testElection_zookeeper() throws Exception {
+        testElection(ELECTION_TYPE.ZOOKEEPER);
+    }
+
+    @Test(timeout = 1000*60*60)
+    public void testElection_hazelcast() throws Exception {
+        testElection(ELECTION_TYPE.HAZELCAST);
+    }
+
+    public void testElection(ELECTION_TYPE electionType) throws Exception {
 
         ArrayList<ElectingLevelDBStore> stores = new ArrayList<ElectingLevelDBStore>();
         ArrayList<CountDownFuture> pending_starts = new ArrayList<CountDownFuture>();
 
         for(String dir: new String[]{"leveldb-node1", "leveldb-node2", "leveldb-node3"}) {
-            ElectingLevelDBStore store = createStoreNode();
+            ElectingLevelDBStore store = createStoreNode(electionType);
             store.setDirectory(new File(data_dir(), dir));
             stores.add(store);
             pending_starts.add(asyncStart(store));
@@ -138,7 +151,7 @@ public class ElectingLevelDBStoreTest extends ZooKeeperTestSupport {
         ArrayList<CountDownFuture> pending_starts = new ArrayList<CountDownFuture>();
 
         for (String dir : new String[]{"leveldb-node1", "leveldb-node2", "leveldb-node3"}) {
-            ElectingLevelDBStore store = createStoreNode();
+            ElectingLevelDBStore store = createStoreNode(ELECTION_TYPE.ZOOKEEPER);
             store.setDirectory(new File(data_dir(), dir));
             stores.add(store);
             pending_starts.add(asyncStart(store));
@@ -206,8 +219,15 @@ public class ElectingLevelDBStoreTest extends ZooKeeperTestSupport {
         return f;
     }
 
-    private ElectingLevelDBStore createStoreNode() {
-        ElectingLevelDBStore store = new ElectingLevelDBStore();
+    private ElectingLevelDBStore createStoreNode(ELECTION_TYPE electionType) {
+        ElectingLevelDBStore store;
+        switch (electionType) {
+            case HAZELCAST: store = new HazelcastElectingLevelDBStore();
+                break;
+            case ZOOKEEPER: store = new ElectingLevelDBStore();
+                break;
+            default: throw new IllegalArgumentException("Unknown election type '"+electionType+"'.");
+        }
         store.setSecurityToken("foo");
         store.setLogSize(1024 * 200);
         store.setReplicas(2);

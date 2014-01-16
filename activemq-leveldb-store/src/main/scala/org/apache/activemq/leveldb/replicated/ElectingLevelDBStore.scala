@@ -155,18 +155,15 @@ class ElectingLevelDBStore extends ProxyLevelDBStore {
   def node_id = ReplicatedLevelDBStoreTrait.node_id(directory)
 
   def init() {
+    registerJMX()
+    readCurrentPosition()
+    initElector()
 
-    if(brokerService!=null && brokerService.isUseJmx){
-      try {
-        AnnotatedMBean.registerMBean(brokerService.getManagementContext, new ReplicatedLevelDBStoreView(this), objectName)
-      } catch {
-        case e: Throwable => {
-          warn(e, "PersistenceAdapterReplication could not be registered in JMX: " + e.getMessage)
-        }
-      }
-    }
+    this.setUseLock(true)
+    this.setLocker(createDefaultLocker())
+  }
 
-    // Figure out our position in the store.
+  def readCurrentPosition() = {
     directory.mkdirs()
     val log = new RecordLog(directory, LevelDBClient.LOG_SUFFIX)
     log.logSize = logSize
@@ -176,7 +173,21 @@ class ElectingLevelDBStore extends ProxyLevelDBStore {
     } finally {
       log.close
     }
+  }
 
+  def registerJMX() = {
+    if(brokerService!=null && brokerService.isUseJmx){
+      try {
+        AnnotatedMBean.registerMBean(brokerService.getManagementContext, new ReplicatedLevelDBStoreView(this), objectName)
+      } catch {
+        case e: Throwable => {
+          warn(e, "PersistenceAdapterReplication could not be registered in JMX: " + e.getMessage)
+        }
+      }
+    }
+  }
+
+  def initElector() = {
     zk_client = new ZKClient(zkAddress, Timespan.parse(zkSessionTmeout), null)
     if( zkPassword!=null ) {
       zk_client.setPassword(zkPassword)
@@ -190,9 +201,6 @@ class ElectingLevelDBStore extends ProxyLevelDBStore {
     master_elector.start(zk_group)
     debug("Joining ZooKeeper group")
     master_elector.join
-
-    this.setUseLock(true)
-    this.setLocker(createDefaultLocker())
   }
 
   def createDefaultLocker(): Locker = new Locker {
@@ -273,9 +281,8 @@ class ElectingLevelDBStore extends ProxyLevelDBStore {
     if(brokerService!=null && brokerService.isUseJmx){
       brokerService.getManagementContext().unregisterMBean(objectName);
     }
-    zk_group.close
-    zk_client.close()
-    zk_client = null
+
+    stopElector()
 
     if( master!=null ) {
       val latch = new CountDownLatch(1)
@@ -295,6 +302,12 @@ class ElectingLevelDBStore extends ProxyLevelDBStore {
     if( master_started.get() ) {
       stopped_latch.countDown()
     }
+  }
+
+  def stopElector() {
+    zk_group.close
+    zk_client.close()
+    zk_client = null
   }
 
   def start_slave(address: String)(func: => Unit) = {
